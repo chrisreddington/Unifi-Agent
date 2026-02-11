@@ -1,0 +1,23 @@
+# Credentials
+.env
+.mcp.json
+ssh-mcp/hosts.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Project-specific
+tmp/
+devtime.json
+
+# Skills not part of this project
+.claude/skills/skill-creator/
+.claude/skills/mcp-builder/
+
+# Old nested git repo
+unifi-mcp/.git/
