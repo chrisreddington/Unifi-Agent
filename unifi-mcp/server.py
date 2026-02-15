@@ -1,11 +1,15 @@
 """UniFi Network MCP Server — exposes UniFi Network API v10.0.162 as MCP tools."""
 
+import logging
 import os
+import re
 from typing import Any
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field
+
+logger = logging.getLogger("unifi_mcp")
 
 mcp = FastMCP("unifi_mcp")
 
@@ -13,27 +17,55 @@ UNIFI_HOST = os.environ.get("UNIFI_HOST", "")
 UNIFI_API_KEY = os.environ.get("UNIFI_API_KEY", "")
 UNIFI_SITE_ID = os.environ.get("UNIFI_SITE_ID", "")
 
+# SSL verification: defaults to True (system CA store).
+# Set UNIFI_SSL_VERIFY=false to disable, or UNIFI_CA_BUNDLE to a cert path.
+_ssl_verify_env = os.environ.get("UNIFI_SSL_VERIFY", "true").lower()
+_ca_bundle = os.environ.get("UNIFI_CA_BUNDLE", "")
+if _ca_bundle:
+    SSL_VERIFY: bool | str = _ca_bundle
+elif _ssl_verify_env in ("false", "0", "no"):
+    logger.warning("SSL verification disabled via UNIFI_SSL_VERIFY=false — connections are vulnerable to MITM")
+    SSL_VERIFY = False
+else:
+    SSL_VERIFY = True
+
+# Reusable HTTP client — created once, shares connection pool
+_client: httpx.AsyncClient | None = None
+
+# Validate API path parameters: UUIDs, hex strings, alphanumeric with dashes
+_SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_\-.:]+$")
+
+
+def _validate_id(value: str, name: str = "id") -> str:
+    """Validate that an ID parameter contains only safe characters."""
+    if not value or not _SAFE_ID_RE.match(value):
+        raise ValueError(f"Invalid {name}: contains unsafe characters")
+    return value
+
 
 def _site(site_id: str | None = None) -> str:
     sid = site_id or UNIFI_SITE_ID
     if not sid:
         raise ValueError("site_id required — pass it or set UNIFI_SITE_ID env var")
-    return sid
+    return _validate_id(sid, "site_id")
 
 
 def _handle_error(e: Exception) -> str:
     if isinstance(e, httpx.HTTPStatusError):
-        r = e.response
-        try:
-            body = r.json()
-        except Exception:
-            body = r.text
+        status = e.response.status_code
         messages = {401: "Unauthorized — check UNIFI_API_KEY", 403: "Forbidden — API key lacks permission", 404: "Not found — check resource ID", 429: "Rate limited — wait and retry"}
-        hint = messages.get(r.status_code, f"HTTP {r.status_code}")
-        return f"{hint}: {body}"
+        return messages.get(status, f"HTTP {status}")
     if isinstance(e, httpx.TimeoutException):
-        return f"Timeout connecting to {UNIFI_HOST}"
+        return "Timeout connecting to controller"
     return str(e)
+
+
+async def _get_client() -> httpx.AsyncClient:
+    """Return a reusable HTTP client with connection pooling."""
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(verify=SSL_VERIFY, timeout=30)
+    return _client
 
 
 async def _api(method: str, path: str, params: dict | None = None, body: Any = None) -> Any:
@@ -41,13 +73,17 @@ async def _api(method: str, path: str, params: dict | None = None, body: Any = N
         raise ValueError("Set UNIFI_HOST and UNIFI_API_KEY environment variables")
     url = f"{UNIFI_HOST.rstrip('/')}/proxy/network/integration{path}"
     headers = {"X-API-KEY": UNIFI_API_KEY, "Content-Type": "application/json"}
-    async with httpx.AsyncClient(verify=False, timeout=30) as client:
-        try:
-            r = await client.request(method, url, headers=headers, params=params, json=body)
-            r.raise_for_status()
-            return r.json() if r.content else {"status": "ok"}
-        except Exception as e:
-            return {"error": _handle_error(e)}
+    client = await _get_client()
+    try:
+        r = await client.request(method, url, headers=headers, params=params, json=body)
+        r.raise_for_status()
+        return r.json() if r.content else {"status": "ok"}
+    except httpx.HTTPStatusError as e:
+        return {"error": _handle_error(e)}
+    except httpx.TimeoutException as e:
+        return {"error": _handle_error(e)}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ── Pydantic Input Models ──
@@ -146,25 +182,25 @@ async def unifi_list_devices(site_id: str | None = None) -> Any:
 @mcp.tool(annotations={"readOnlyHint": True})
 async def unifi_get_device(device_id: str, site_id: str | None = None) -> Any:
     """Get detailed info for a single device by its ID."""
-    return await _api("GET", f"/v1/sites/{_site(site_id)}/devices/{device_id}")
+    return await _api("GET", f"/v1/sites/{_site(site_id)}/devices/{_validate_id(device_id, 'device_id')}")
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def unifi_get_device_stats(device_id: str, site_id: str | None = None) -> Any:
     """Get latest statistics for a device (uptime, throughput, CPU, memory)."""
-    return await _api("GET", f"/v1/sites/{_site(site_id)}/devices/{device_id}/statistics/latest")
+    return await _api("GET", f"/v1/sites/{_site(site_id)}/devices/{_validate_id(device_id, 'device_id')}/statistics/latest")
 
 
 @mcp.tool(annotations={"destructiveHint": True})
 async def unifi_restart_device(device_id: str, site_id: str | None = None) -> Any:
     """Restart (reboot) a device. Action: RESTART."""
-    return await _api("POST", f"/v1/sites/{_site(site_id)}/devices/{device_id}/actions", body={"action": "RESTART"})
+    return await _api("POST", f"/v1/sites/{_site(site_id)}/devices/{_validate_id(device_id, 'device_id')}/actions", body={"action": "RESTART"})
 
 
 @mcp.tool(annotations={"destructiveHint": True})
 async def unifi_power_cycle_port(device_id: str, port_idx: int, site_id: str | None = None) -> Any:
     """Power-cycle a specific PoE port on a switch. Action: POWER_CYCLE."""
-    return await _api("POST", f"/v1/sites/{_site(site_id)}/devices/{device_id}/interfaces/ports/{port_idx}/actions", body={"action": "POWER_CYCLE"})
+    return await _api("POST", f"/v1/sites/{_site(site_id)}/devices/{_validate_id(device_id, 'device_id')}/interfaces/ports/{port_idx}/actions", body={"action": "POWER_CYCLE"})
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -185,19 +221,19 @@ async def unifi_list_clients(site_id: str | None = None) -> Any:
 @mcp.tool(annotations={"readOnlyHint": True})
 async def unifi_get_client(client_id: str, site_id: str | None = None) -> Any:
     """Get detailed info for a single client by its ID."""
-    return await _api("GET", f"/v1/sites/{_site(site_id)}/clients/{client_id}")
+    return await _api("GET", f"/v1/sites/{_site(site_id)}/clients/{_validate_id(client_id, 'client_id')}")
 
 
 @mcp.tool(annotations={"destructiveHint": False, "openWorldHint": True})
 async def unifi_authorize_guest(client_id: str, site_id: str | None = None) -> Any:
     """Authorize a guest client (e.g. after captive portal). Action: AUTHORIZE_GUEST."""
-    return await _api("POST", f"/v1/sites/{_site(site_id)}/clients/{client_id}/actions", body={"action": "AUTHORIZE_GUEST"})
+    return await _api("POST", f"/v1/sites/{_site(site_id)}/clients/{_validate_id(client_id, 'client_id')}/actions", body={"action": "AUTHORIZE_GUEST"})
 
 
 @mcp.tool(annotations={"destructiveHint": True})
 async def unifi_unauthorize_guest(client_id: str, site_id: str | None = None) -> Any:
     """Revoke guest authorization for a client. Action: UNAUTHORIZE_GUEST."""
-    return await _api("POST", f"/v1/sites/{_site(site_id)}/clients/{client_id}/actions", body={"action": "UNAUTHORIZE_GUEST"})
+    return await _api("POST", f"/v1/sites/{_site(site_id)}/clients/{_validate_id(client_id, 'client_id')}/actions", body={"action": "UNAUTHORIZE_GUEST"})
 
 
 # ── Tools: Networks ──
@@ -212,7 +248,7 @@ async def unifi_list_networks(site_id: str | None = None) -> Any:
 @mcp.tool(annotations={"readOnlyHint": True})
 async def unifi_get_network(network_id: str, site_id: str | None = None) -> Any:
     """Get detailed info for a single network by its ID."""
-    return await _api("GET", f"/v1/sites/{_site(site_id)}/networks/{network_id}")
+    return await _api("GET", f"/v1/sites/{_site(site_id)}/networks/{_validate_id(network_id, 'network_id')}")
 
 
 @mcp.tool(annotations={"destructiveHint": False})
@@ -225,19 +261,19 @@ async def unifi_create_network(config: NetworkConfig, site_id: str | None = None
 @mcp.tool(annotations={"idempotentHint": True})
 async def unifi_update_network(network_id: str, config: NetworkConfig, site_id: str | None = None) -> Any:
     """Update an existing network by ID. Provide full NetworkConfig (PUT semantics — all fields required)."""
-    return await _api("PUT", f"/v1/sites/{_site(site_id)}/networks/{network_id}", body=config.model_dump(exclude_none=True))
+    return await _api("PUT", f"/v1/sites/{_site(site_id)}/networks/{_validate_id(network_id, 'network_id')}", body=config.model_dump(exclude_none=True))
 
 
 @mcp.tool(annotations={"destructiveHint": True})
 async def unifi_delete_network(network_id: str, site_id: str | None = None) -> Any:
     """Delete a network by ID. Check references first with unifi_get_network_references."""
-    return await _api("DELETE", f"/v1/sites/{_site(site_id)}/networks/{network_id}")
+    return await _api("DELETE", f"/v1/sites/{_site(site_id)}/networks/{_validate_id(network_id, 'network_id')}")
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def unifi_get_network_references(network_id: str, site_id: str | None = None) -> Any:
     """Get resources referencing this network (WiFi, firewall zones, etc.). Check before deleting."""
-    return await _api("GET", f"/v1/sites/{_site(site_id)}/networks/{network_id}/references")
+    return await _api("GET", f"/v1/sites/{_site(site_id)}/networks/{_validate_id(network_id, 'network_id')}/references")
 
 
 # ── Tools: WiFi Broadcasts ──
@@ -252,7 +288,7 @@ async def unifi_list_wifi(site_id: str | None = None) -> Any:
 @mcp.tool(annotations={"readOnlyHint": True})
 async def unifi_get_wifi(wifi_id: str, site_id: str | None = None) -> Any:
     """Get detailed info for a single WiFi broadcast by its ID."""
-    return await _api("GET", f"/v1/sites/{_site(site_id)}/wifi/broadcasts/{wifi_id}")
+    return await _api("GET", f"/v1/sites/{_site(site_id)}/wifi/broadcasts/{_validate_id(wifi_id, 'wifi_id')}")
 
 
 @mcp.tool(annotations={"destructiveHint": False})
@@ -265,13 +301,13 @@ async def unifi_create_wifi(config: WifiConfig, site_id: str | None = None) -> A
 @mcp.tool(annotations={"idempotentHint": True})
 async def unifi_update_wifi(wifi_id: str, config: WifiConfig, site_id: str | None = None) -> Any:
     """Update an existing WiFi broadcast by ID. Provide full WifiConfig (PUT semantics)."""
-    return await _api("PUT", f"/v1/sites/{_site(site_id)}/wifi/broadcasts/{wifi_id}", body=config.model_dump(exclude_none=True))
+    return await _api("PUT", f"/v1/sites/{_site(site_id)}/wifi/broadcasts/{_validate_id(wifi_id, 'wifi_id')}", body=config.model_dump(exclude_none=True))
 
 
 @mcp.tool(annotations={"destructiveHint": True})
 async def unifi_delete_wifi(wifi_id: str, site_id: str | None = None) -> Any:
     """Delete a WiFi broadcast by ID."""
-    return await _api("DELETE", f"/v1/sites/{_site(site_id)}/wifi/broadcasts/{wifi_id}")
+    return await _api("DELETE", f"/v1/sites/{_site(site_id)}/wifi/broadcasts/{_validate_id(wifi_id, 'wifi_id')}")
 
 
 # ── Tools: Hotspot Vouchers ──
@@ -286,7 +322,7 @@ async def unifi_list_vouchers(site_id: str | None = None) -> Any:
 @mcp.tool(annotations={"readOnlyHint": True})
 async def unifi_get_voucher(voucher_id: str, site_id: str | None = None) -> Any:
     """Get detailed info for a single voucher by its ID."""
-    return await _api("GET", f"/v1/sites/{_site(site_id)}/hotspot/vouchers/{voucher_id}")
+    return await _api("GET", f"/v1/sites/{_site(site_id)}/hotspot/vouchers/{_validate_id(voucher_id, 'voucher_id')}")
 
 
 @mcp.tool(annotations={"destructiveHint": False})
@@ -299,7 +335,7 @@ async def unifi_create_vouchers(config: VoucherCreateInput, site_id: str | None 
 @mcp.tool(annotations={"destructiveHint": True})
 async def unifi_delete_voucher(voucher_id: str, site_id: str | None = None) -> Any:
     """Delete a single voucher by ID."""
-    return await _api("DELETE", f"/v1/sites/{_site(site_id)}/hotspot/vouchers/{voucher_id}")
+    return await _api("DELETE", f"/v1/sites/{_site(site_id)}/hotspot/vouchers/{_validate_id(voucher_id, 'voucher_id')}")
 
 
 @mcp.tool(annotations={"destructiveHint": True})
@@ -320,7 +356,7 @@ async def unifi_list_firewall_zones(site_id: str | None = None) -> Any:
 @mcp.tool(annotations={"readOnlyHint": True})
 async def unifi_get_firewall_zone(zone_id: str, site_id: str | None = None) -> Any:
     """Get detailed info for a single firewall zone by its ID."""
-    return await _api("GET", f"/v1/sites/{_site(site_id)}/firewall/zones/{zone_id}")
+    return await _api("GET", f"/v1/sites/{_site(site_id)}/firewall/zones/{_validate_id(zone_id, 'zone_id')}")
 
 
 @mcp.tool(annotations={"destructiveHint": False})
@@ -332,13 +368,13 @@ async def unifi_create_firewall_zone(config: FirewallZoneInput, site_id: str | N
 @mcp.tool(annotations={"idempotentHint": True})
 async def unifi_update_firewall_zone(zone_id: str, config: FirewallZoneInput, site_id: str | None = None) -> Any:
     """Update an existing firewall zone by ID. Provide full FirewallZoneInput (PUT semantics)."""
-    return await _api("PUT", f"/v1/sites/{_site(site_id)}/firewall/zones/{zone_id}", body=config.model_dump(exclude_none=True))
+    return await _api("PUT", f"/v1/sites/{_site(site_id)}/firewall/zones/{_validate_id(zone_id, 'zone_id')}", body=config.model_dump(exclude_none=True))
 
 
 @mcp.tool(annotations={"destructiveHint": True})
 async def unifi_delete_firewall_zone(zone_id: str, site_id: str | None = None) -> Any:
     """Delete a firewall zone by ID."""
-    return await _api("DELETE", f"/v1/sites/{_site(site_id)}/firewall/zones/{zone_id}")
+    return await _api("DELETE", f"/v1/sites/{_site(site_id)}/firewall/zones/{_validate_id(zone_id, 'zone_id')}")
 
 
 # ── Tools: ACL Rules ──
@@ -353,7 +389,7 @@ async def unifi_list_acl_rules(site_id: str | None = None) -> Any:
 @mcp.tool(annotations={"readOnlyHint": True})
 async def unifi_get_acl_rule(rule_id: str, site_id: str | None = None) -> Any:
     """Get detailed info for a single ACL rule by its ID."""
-    return await _api("GET", f"/v1/sites/{_site(site_id)}/acl-rules/{rule_id}")
+    return await _api("GET", f"/v1/sites/{_site(site_id)}/acl-rules/{_validate_id(rule_id, 'rule_id')}")
 
 
 @mcp.tool(annotations={"destructiveHint": False})
@@ -366,13 +402,13 @@ async def unifi_create_acl_rule(config: AclRuleConfig, site_id: str | None = Non
 @mcp.tool(annotations={"idempotentHint": True})
 async def unifi_update_acl_rule(rule_id: str, config: AclRuleConfig, site_id: str | None = None) -> Any:
     """Update an existing ACL rule by ID. Provide full AclRuleConfig (PUT semantics)."""
-    return await _api("PUT", f"/v1/sites/{_site(site_id)}/acl-rules/{rule_id}", body=config.model_dump(exclude_none=True))
+    return await _api("PUT", f"/v1/sites/{_site(site_id)}/acl-rules/{_validate_id(rule_id, 'rule_id')}", body=config.model_dump(exclude_none=True))
 
 
 @mcp.tool(annotations={"destructiveHint": True})
 async def unifi_delete_acl_rule(rule_id: str, site_id: str | None = None) -> Any:
     """Delete an ACL rule by ID."""
-    return await _api("DELETE", f"/v1/sites/{_site(site_id)}/acl-rules/{rule_id}")
+    return await _api("DELETE", f"/v1/sites/{_site(site_id)}/acl-rules/{_validate_id(rule_id, 'rule_id')}")
 
 
 # ── Tools: Traffic Matching Lists ──
@@ -387,7 +423,7 @@ async def unifi_list_traffic_matching_lists(site_id: str | None = None) -> Any:
 @mcp.tool(annotations={"readOnlyHint": True})
 async def unifi_get_traffic_matching_list(list_id: str, site_id: str | None = None) -> Any:
     """Get detailed info for a single traffic matching list by its ID."""
-    return await _api("GET", f"/v1/sites/{_site(site_id)}/traffic-matching-lists/{list_id}")
+    return await _api("GET", f"/v1/sites/{_site(site_id)}/traffic-matching-lists/{_validate_id(list_id, 'list_id')}")
 
 
 @mcp.tool(annotations={"destructiveHint": False})
@@ -400,13 +436,13 @@ async def unifi_create_traffic_matching_list(config: TrafficMatchingListConfig, 
 @mcp.tool(annotations={"idempotentHint": True})
 async def unifi_update_traffic_matching_list(list_id: str, config: TrafficMatchingListConfig, site_id: str | None = None) -> Any:
     """Update an existing traffic matching list by ID. Provide full TrafficMatchingListConfig (PUT semantics)."""
-    return await _api("PUT", f"/v1/sites/{_site(site_id)}/traffic-matching-lists/{list_id}", body=config.model_dump(exclude_none=True))
+    return await _api("PUT", f"/v1/sites/{_site(site_id)}/traffic-matching-lists/{_validate_id(list_id, 'list_id')}", body=config.model_dump(exclude_none=True))
 
 
 @mcp.tool(annotations={"destructiveHint": True})
 async def unifi_delete_traffic_matching_list(list_id: str, site_id: str | None = None) -> Any:
     """Delete a traffic matching list by ID."""
-    return await _api("DELETE", f"/v1/sites/{_site(site_id)}/traffic-matching-lists/{list_id}")
+    return await _api("DELETE", f"/v1/sites/{_site(site_id)}/traffic-matching-lists/{_validate_id(list_id, 'list_id')}")
 
 
 # ── Tools: Supporting Resources (Read-Only) ──

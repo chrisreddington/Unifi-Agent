@@ -3,7 +3,7 @@ name = "unifi-mcp"
 version = "0.1.0"
 description = "MCP server exposing the UniFi Network API as tools"
 requires-python = ">=3.11"
-dependencies = ["mcp[cli]", "httpx", "pydantic"]
+dependencies = ["mcp[cli]>=1.26,<2", "httpx>=0.28,<1", "pydantic>=2.12,<3"]
 
 [build-system]
 requires = ["hatchling"]

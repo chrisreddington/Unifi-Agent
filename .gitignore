@@ -1,6 +1,5 @@
 # Credentials
 .mcp.json
-ssh-mcp/hosts.json
 
 # Python
 .venv/

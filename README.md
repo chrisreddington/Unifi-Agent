@@ -1,6 +1,6 @@
 # Unifi Agent
 
-AI-powered UniFi network management through [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Two MCP servers expose 56 tools that let Claude manage your entire UniFi infrastructure — devices, clients, networks, WiFi, firewall rules, VLANs, hotspot vouchers, and more. An SSH server provides direct shell access for advanced configuration beyond the API.
+AI-powered UniFi network management through [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Two MCP servers expose 55 tools that let Claude manage your entire UniFi infrastructure — devices, clients, networks, WiFi, firewall rules, VLANs, hotspot vouchers, and more. An SSH server provides direct shell access for advanced configuration beyond the API.
 
 ## What Can It Do?
 
@@ -16,7 +16,7 @@ Ask Claude things like:
 
 ```
 unifi-mcp/          51 tools — UniFi Integration API (Python, httpx, Pydantic)
-ssh-mcp/             5 tools — SSH command execution (Python, asyncssh)
+ssh-mcp/             4 tools — SSH command execution (Python, asyncssh, uses ~/.ssh/config)
 .claude/skills/      Claude Code skill with example payloads and gotchas
 ```
 
@@ -41,7 +41,6 @@ cd ssh-mcp && uv sync && cd ..
 **2. Configure credentials:**
 ```bash
 cp .mcp.json.sample .mcp.json
-cp ssh-mcp/hosts.json.sample ssh-mcp/hosts.json
 ```
 
 Edit `.mcp.json` with your controller URL, API key, and site ID:
@@ -59,9 +58,22 @@ Edit `.mcp.json` with your controller URL, API key, and site ID:
 }
 ```
 
-Edit `ssh-mcp/hosts.json` with your SSH credentials.
+**3. Configure SSH access (uses system SSH config):**
 
-**3. Find your Site ID:**
+Add your UDM-Pro to `~/.ssh/config`:
+```
+Host udm
+    HostName 192.168.1.1
+    User root
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+Ensure the host key is in your known_hosts:
+```bash
+ssh-keyscan 192.168.1.1 >> ~/.ssh/known_hosts
+```
+
+**4. Find your Site ID:**
 ```bash
 # Start Claude Code from the project directory
 claude
@@ -92,11 +104,10 @@ Claude will automatically connect to both MCP servers and have access to all 56 
 | **Traffic Lists** | `list_traffic_matching_lists`, `get_traffic_matching_list`, `create_traffic_matching_list`, `update_traffic_matching_list`, `delete_traffic_matching_list` | Port/IP groups |
 | **Supporting** | `list_wans`, `list_vpn_tunnels`, `list_vpn_servers`, `list_radius_profiles`, `list_device_tags`, `list_dpi_categories`, `list_dpi_applications`, `list_countries` | Read-only |
 
-### SSH MCP (5 tools)
+### SSH MCP (4 tools)
 
 | Tool | Description |
 |------|-------------|
-| `ssh_list_hosts` | List configured SSH hosts (no passwords shown) |
 | `ssh_execute` | One-shot command on a remote host |
 | `ssh_session_start` | Open persistent session (30min timeout) |
 | `ssh_session_command` | Run command in session (preserves cwd) |
@@ -129,7 +140,8 @@ db.task.insertMany(
 - **WiFi/Network creation**: The API requires many more fields than the schema suggests. The skill file (`.claude/skills/unifi/SKILL.md`) has complete working payloads.
 - **ACL rule ordering**: Lower `index` = higher priority (first-match-wins).
 - **Bulk delete filter syntax**: Values with spaces need single quotes: `name.eq('My Thing')`.
-- **SSL**: The server disables SSL verification for self-signed controller certificates.
+- **SSL verification**: Enabled by default (uses system CA store). For self-signed certs, set `UNIFI_CA_BUNDLE=/path/to/cert.pem` in `.mcp.json` env, or set `UNIFI_SSL_VERIFY=false` to disable (not recommended).
+- **SSH access**: Uses your system `~/.ssh/config` and `~/.ssh/known_hosts`. No separate credentials file needed.
 
 ## License
 
