@@ -40,19 +40,24 @@ cd ssh-mcp && uv sync && cd ..
 
 **2. Configure credentials:**
 ```bash
-cp .env.sample .env
 cp .mcp.json.sample .mcp.json
 cp ssh-mcp/hosts.json.sample ssh-mcp/hosts.json
 ```
 
-Edit `.env` with your controller URL, API key, and site ID:
-```env
-UNIFI_HOST=https://192.168.1.1
-UNIFI_API_KEY=your-api-key-here
-UNIFI_SITE_ID=your-site-id
+Edit `.mcp.json` with your controller URL, API key, and site ID:
+```json
+{
+  "mcpServers": {
+    "unifi": {
+      "env": {
+        "UNIFI_HOST": "https://192.168.1.1",
+        "UNIFI_API_KEY": "your-api-key-here",
+        "UNIFI_SITE_ID": "your-site-id"
+      }
+    }
+  }
+}
 ```
-
-Edit `.mcp.json` with the same values and adjust paths if needed.
 
 Edit `ssh-mcp/hosts.json` with your SSH credentials.
 

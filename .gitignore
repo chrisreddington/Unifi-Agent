@@ -1,5 +1,4 @@
 # Credentials
-.env
 .mcp.json
 ssh-mcp/hosts.json
 
