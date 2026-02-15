@@ -117,6 +117,8 @@ Claude will automatically connect to both MCP servers and have access to all 56 
 
 The Integration API doesn't expose everything. For radio configuration, channel widths, min-RSSI thresholds, and other low-level settings, the SSH MCP server connects directly to the UDM-Pro's MongoDB:
 
+> **Note on root SSH access:** UniFi Dream Machine Pro devices only provide a `root` account for SSH — there is no way to create non-root users on the device. This is a UniFi platform constraint. To mitigate risk, use SSH key authentication (no passwords), protect your private key with a passphrase, and restrict access to trusted networks.
+
 ```bash
 # Example: Change 5GHz channel width to 160MHz on all APs
 mongo --port 27117 ace --eval '
