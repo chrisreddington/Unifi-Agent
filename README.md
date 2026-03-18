@@ -1,10 +1,10 @@
 # Unifi Agent
 
-AI-powered UniFi network management through [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Two MCP servers expose 55 tools that let Claude manage your entire UniFi infrastructure — devices, clients, networks, WiFi, firewall rules, VLANs, hotspot vouchers, and more. An SSH server provides direct shell access for advanced configuration beyond the API.
+AI-powered UniFi network management through MCP-compatible AI tooling. Two MCP servers expose 55 tools that let assistants such as [GitHub Copilot CLI](https://github.com/github/copilot-cli) and [Claude Code](https://docs.anthropic.com/en/docs/claude-code) manage your entire UniFi infrastructure — devices, clients, networks, WiFi, firewall rules, VLANs, hotspot vouchers, and more. An SSH server provides direct shell access for advanced configuration beyond the API.
 
 ## What Can It Do?
 
-Ask Claude things like:
+Ask your AI assistant things like:
 - "List all devices and show me which ones have high CPU usage"
 - "Create a guest network on VLAN 50 with a captive portal"
 - "Set up an ACL rule to block IoT devices from reaching the management VLAN"
@@ -24,7 +24,7 @@ ssh-mcp/             4 tools — SSH command execution (Python, asyncssh, uses ~
 
 - [Python 3.11+](https://www.python.org/downloads/)
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI
+- An MCP-capable AI tool such as [GitHub Copilot CLI](https://github.com/github/copilot-cli) or [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 - UniFi Network controller with [Integration API](https://help.ui.com/hc/en-us/articles/32910498498583-UniFi-Integration-API) enabled
 - API key from **UniFi Network > Settings > API**
 
@@ -75,17 +75,26 @@ ssh-keyscan 192.168.1.1 >> ~/.ssh/known_hosts
 
 **4. Find your Site ID:**
 ```bash
-# Start Claude Code from the project directory
-claude
-# Then ask: "List all sites"
-```
+# Start your MCP-capable AI tool from the project directory
+# Example using GitHub Copilot CLI:
+copilot 
 
-**4. Start using it:**
+# Example using Claude Code:
+claude
+
+```
+Then ask: `List all sites`
+
+**5. Start using it:**
 ```bash
+# Example using GitHub Copilot CLI:
+copilot
+
+# Example using Claude Code:
 claude
 ```
 
-Claude will automatically connect to both MCP servers and have access to all 56 tools.
+Your MCP-capable AI tool can then connect to both MCP servers and access all 55 tools. Use natural language commands to interact with your UniFi network, or refer to the skill documentation for example payloads and gotchas.
 
 ## Tools
 
@@ -142,8 +151,16 @@ db.task.insertMany(
 - **WiFi/Network creation**: The API requires many more fields than the schema suggests. The skill file (`.claude/skills/unifi/SKILL.md`) has complete working payloads.
 - **ACL rule ordering**: Lower `index` = higher priority (first-match-wins).
 - **Bulk delete filter syntax**: Values with spaces need single quotes: `name.eq('My Thing')`.
-- **SSL verification**: Enabled by default (uses system CA store). For self-signed certs, set `UNIFI_CA_BUNDLE=/path/to/cert.pem` in `.mcp.json` env, or set `UNIFI_SSL_VERIFY=false` to disable (not recommended).
+- **SSL verification**: Enabled by default using the standard httpx/Python certificate verification behavior. Optionally, set `UNIFI_SSL_USE_TRUSTSTORE=true` to use the native platform trust store, set `UNIFI_CA_BUNDLE=/path/to/cert.pem` for an explicit CA bundle, or set `UNIFI_SSL_VERIFY=false` to disable verification (not recommended).
 - **SSH access**: Uses your system `~/.ssh/config` and `~/.ssh/known_hosts`. No separate credentials file needed.
+
+## Testing
+
+Run the security tests inside the `unifi-mcp` environment so the server dependencies are available:
+
+```bash
+uv run --project unifi-mcp --with pytest pytest -q tests/test_unifi_security.py
+```
 
 ## License
 

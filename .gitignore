@@ -12,6 +12,7 @@ build/
 # Project-specific
 tmp/
 devtime.json
+.DS_Store
 
 # Skills not part of this project
 .claude/skills/skill-creator/

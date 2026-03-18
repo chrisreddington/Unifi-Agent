@@ -1,7 +1,13 @@
 """Security tests for UniFi MCP server — ID validation and SSL config."""
 
+import builtins
+import importlib.util
 import re
-import os
+import ssl
+import sys
+import types
+from pathlib import Path
+
 import pytest
 
 # Replicate the validation logic directly to avoid importing server dependencies
@@ -77,18 +83,71 @@ class TestIdValidation:
 class TestSslConfig:
     """Tests for SSL verification configuration."""
 
-    def test_ssl_verify_defaults_true(self):
-        """SSL_VERIFY should default to True when env var not set."""
-        import os
-        # The module reads env at import time, so we verify the logic
-        env_val = os.environ.get("UNIFI_SSL_VERIFY", "true").lower()
-        ca_bundle = os.environ.get("UNIFI_CA_BUNDLE", "")
-        if not ca_bundle and env_val not in ("false", "0", "no"):
-            assert True  # Default path: verify=True
-        else:
-            pytest.skip("Env vars set, cannot test default")
+    @staticmethod
+    def _load_server_module(module_name: str = "unifi_server_test_module"):
+        sys.modules.pop(module_name, None)
+        server_path = Path(__file__).resolve().parents[1] / "unifi-mcp" / "server.py"
+        spec = importlib.util.spec_from_file_location(module_name, server_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        return module
+
+    def test_ssl_verify_defaults_true(self, monkeypatch: pytest.MonkeyPatch):
+        """Default secure mode should keep httpx/Python defaults."""
+        monkeypatch.delenv("UNIFI_SSL_VERIFY", raising=False)
+        monkeypatch.delenv("UNIFI_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("UNIFI_SSL_USE_TRUSTSTORE", raising=False)
+        module = self._load_server_module()
+        assert module.SSL_VERIFY is True
 
     def test_ssl_verify_false_values(self):
         """All falsy string values should be recognized."""
         for val in ("false", "0", "no", "False", "FALSE", "No", "NO"):
             assert val.lower() in ("false", "0", "no")
+
+    def test_ssl_verify_false_disables_verification(self, monkeypatch: pytest.MonkeyPatch):
+        """The insecure opt-out should still work."""
+        monkeypatch.setenv("UNIFI_SSL_VERIFY", "false")
+        monkeypatch.delenv("UNIFI_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("UNIFI_SSL_USE_TRUSTSTORE", raising=False)
+        module = self._load_server_module("unifi_server_ssl_disabled")
+        assert module.SSL_VERIFY is False
+
+    def test_ca_bundle_uses_base_httpx_behavior(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        """An explicit CA bundle should use the standard httpx verify path by default."""
+        cert = tmp_path / "test.pem"
+        cert.write_text("dummy")
+        monkeypatch.delenv("UNIFI_SSL_VERIFY", raising=False)
+        monkeypatch.setenv("UNIFI_CA_BUNDLE", str(cert))
+        monkeypatch.delenv("UNIFI_SSL_USE_TRUSTSTORE", raising=False)
+        module = self._load_server_module("unifi_server_ca_bundle")
+        assert module.SSL_VERIFY == str(cert)
+
+    def test_truststore_is_opt_in(self, monkeypatch: pytest.MonkeyPatch):
+        """The platform trust store should only be used when explicitly enabled."""
+        monkeypatch.delenv("UNIFI_SSL_VERIFY", raising=False)
+        monkeypatch.delenv("UNIFI_CA_BUNDLE", raising=False)
+        monkeypatch.setenv("UNIFI_SSL_USE_TRUSTSTORE", "true")
+        monkeypatch.setitem(sys.modules, "truststore", types.SimpleNamespace(SSLContext=ssl.SSLContext))
+        module = self._load_server_module("unifi_server_truststore_enabled")
+        assert isinstance(module.SSL_VERIFY, ssl.SSLContext)
+        assert module.SSL_VERIFY.verify_mode == ssl.CERT_REQUIRED
+
+    def test_truststore_requires_optional_dependency(self, monkeypatch: pytest.MonkeyPatch):
+        """Opting into truststore should fail clearly if the package is unavailable."""
+        monkeypatch.delenv("UNIFI_SSL_VERIFY", raising=False)
+        monkeypatch.delenv("UNIFI_CA_BUNDLE", raising=False)
+        monkeypatch.setenv("UNIFI_SSL_USE_TRUSTSTORE", "true")
+        monkeypatch.delitem(sys.modules, "truststore", raising=False)
+
+        real_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name == "truststore":
+                raise ImportError("missing optional dependency")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+        with pytest.raises(RuntimeError, match="optional truststore package"):
+            self._load_server_module("unifi_server_missing_truststore")

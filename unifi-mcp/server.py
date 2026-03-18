@@ -1,8 +1,10 @@
 """UniFi Network MCP Server — exposes UniFi Network API v10.0.162 as MCP tools."""
 
+import atexit
 import logging
 import os
 import re
+import ssl
 from typing import Any
 
 import httpx
@@ -17,17 +19,47 @@ UNIFI_HOST = os.environ.get("UNIFI_HOST", "")
 UNIFI_API_KEY = os.environ.get("UNIFI_API_KEY", "")
 UNIFI_SITE_ID = os.environ.get("UNIFI_SITE_ID", "")
 
-# SSL verification: defaults to True (system CA store).
-# Set UNIFI_SSL_VERIFY=false to disable, or UNIFI_CA_BUNDLE to a cert path.
+# SSL verification keeps the default httpx/Python behavior unless explicitly configured.
+# Set UNIFI_SSL_VERIFY=false to disable, UNIFI_CA_BUNDLE to a cert path, or
+# UNIFI_SSL_USE_TRUSTSTORE=true to opt into the platform trust store.
 _ssl_verify_env = os.environ.get("UNIFI_SSL_VERIFY", "true").lower()
 _ca_bundle = os.environ.get("UNIFI_CA_BUNDLE", "")
-if _ca_bundle:
-    SSL_VERIFY: bool | str = _ca_bundle
-elif _ssl_verify_env in ("false", "0", "no"):
-    logger.warning("SSL verification disabled via UNIFI_SSL_VERIFY=false — connections are vulnerable to MITM")
-    SSL_VERIFY = False
-else:
-    SSL_VERIFY = True
+_use_truststore_env = os.environ.get("UNIFI_SSL_USE_TRUSTSTORE", "false").lower()
+
+
+def _env_is_truthy(value: str) -> bool:
+    return value in ("true", "1", "yes")
+
+
+def _build_ssl_verify() -> bool | str | ssl.SSLContext:
+    """Build TLS verification config for httpx.
+
+    Default behavior stays aligned with httpx/Python. Callers can opt into the
+    native OS trust store with UNIFI_SSL_USE_TRUSTSTORE=true, point at an
+    explicit CA bundle with UNIFI_CA_BUNDLE, or disable verification entirely
+    with UNIFI_SSL_VERIFY=false.
+    """
+    if _ssl_verify_env in ("false", "0", "no"):
+        logger.warning("SSL verification disabled via UNIFI_SSL_VERIFY=false — connections are vulnerable to MITM")
+        return False
+
+    if not _env_is_truthy(_use_truststore_env):
+        return _ca_bundle or True
+
+    try:
+        import truststore
+    except ImportError as exc:
+        raise RuntimeError(
+            "UNIFI_SSL_USE_TRUSTSTORE=true requires the optional truststore package"
+        ) from exc
+
+    ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    if _ca_bundle:
+        ctx.load_verify_locations(cafile=_ca_bundle)
+    return ctx
+
+
+SSL_VERIFY = _build_ssl_verify()
 
 # Reusable HTTP client — created once, shares connection pool
 _client: httpx.AsyncClient | None = None
@@ -58,6 +90,30 @@ def _handle_error(e: Exception) -> str:
     if isinstance(e, httpx.TimeoutException):
         return "Timeout connecting to controller"
     return str(e)
+
+
+def _cleanup_http_client() -> None:
+    """Close the HTTP client on shutdown to avoid connection leaks."""
+    global _client
+    if _client is None or _client.is_closed:
+        _client = None
+        return
+
+    import asyncio
+
+    try:
+        asyncio.run(_client.aclose())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_client.aclose())
+        finally:
+            loop.close()
+    finally:
+        _client = None
+
+
+atexit.register(_cleanup_http_client)
 
 
 async def _get_client() -> httpx.AsyncClient:
